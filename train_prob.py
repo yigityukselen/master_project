@@ -99,31 +99,20 @@ class FlowDataset(data.Dataset):
     def __len__(self):
         return len(self.image_list)
 
-"""
-class KITTI(FlowDataset):
-    def __init__(self, aug_params=None, split='training', root='data_scene_flow'):
-        super(KITTI, self).__init__(aug_params, sparse=True)
-        if split == 'testing':
-            self.is_test = True
-
-        root = osp.join(root, split)
-        images1 = sorted(glob(osp.join(root, 'image_2/*_10.png')))
-        images2 = sorted(glob(osp.join(root, 'image_2/*_11.png')))
-
-        for img1, img2 in zip(images1, images2):
-            frame_id = img1.split('/')[-1]
-            self.extra_info += [ [frame_id] ]
-            self.image_list += [ [img1, img2] ]
-
-        if split == 'training':
-            self.flow_list = sorted(glob(osp.join(root, 'flow_occ/*_10.png')))
-"""
 
 class KITTI(torch.utils.data.Dataset):
-    def __init__(self):
-        self.left_images = sorted(glob(os.path.join("./data_scene_flow/training", 'image_2/*_10.png')))
-        self.right_images = sorted(glob(os.path.join("./data_scene_flow/training", 'image_2/*_11.png')))
-        self.target_flows = sorted(glob(os.path.join("./data_scene_flow/training", 'flow_occ/*_10.png')))
+    def __init__(self, mode=None):
+        self.left_images = None
+        self.right_images = None
+        self.target_flows = None
+        if mode == "training":
+            self.left_images = sorted(glob(os.path.join("./data_scene_flow/training", 'image_2_training/*_10.png')))
+            self.right_images = sorted(glob(os.path.join("./data_scene_flow/training", 'image_2_training/*_11.png')))
+            self.target_flows = sorted(glob(os.path.join("./data_scene_flow/training", 'flow_occ_training/*_10.png')))
+        elif mode == "testing":
+            self.left_images = sorted(glob(os.path.join("./data_scene_flow/training", 'image_2_testing/*_10.png')))
+            self.right_images = sorted(glob(os.path.join("./data_scene_flow/training", 'image_2_testing/*_11.png')))
+            self.target_flows = sorted(glob(os.path.join("./data_scene_flow/training", 'flow_occ_testing/*_10.png')))
 
     def __getitem__(self, index):
         left_image = Image.open(self.left_images[index])
@@ -158,6 +147,7 @@ def ProbabilisticNLLLoss(predicted_flows, target_flow, valids):
     upsample = torch.nn.Upsample(size=(320, 896), mode='bilinear', align_corners=False)
     loss = 0.0
     epsilon = 0.00001
+    loss_test = 0.0
     for predicted_flow in predicted_flows:
         upsampled_flow = upsample(predicted_flow)
         upsampled_flow = upsampled_flow * (320 // predicted_flow.shape[2])
@@ -170,9 +160,6 @@ def ProbabilisticNLLLoss(predicted_flows, target_flow, valids):
         loss_u = -dist_u.log_prob(target_flow[:, 0, :, :])
         loss_v = -dist_v.log_prob(target_flow[:, 1, :, :])
         loss = loss + torch.mul(loss_u, valids).mean() + torch.mul(loss_v, valids).mean()
-        """loss_u = torch.log(sigma_u + epsilon) + torch.div(torch.mul((mean_u - target_flow[:, 0, :, :]), (mean_u - target_flow[:, 0, :, :])), torch.mul(torch.mul(sigma_u, sigma_u), 2) + epsilon)
-        loss_v = torch.log(sigma_v + epsilon) + torch.div(torch.mul((mean_v - target_flow[:, 1, :, :]), (mean_v - target_flow[:, 1, :, :])), torch.mul(torch.mul(sigma_v, sigma_v), 2) + epsilon)
-        loss = loss + torch.mul(torch.sum(loss_u + loss_v), valids).mean()"""
     return loss
 
 def upsample_flow_predictions(flow_list):
@@ -201,20 +188,43 @@ def total_EPE_loss(upsampled_flow_list, target_flows, valids):
         total_loss = total_loss + EPE(upsampled_flow, target_flows, valids)
     return total_loss
 
+def reverse_optical_flow(target_flows, device):
+    batch_reversed_flow = None
+    for batch_idx in range(target_flows.shape[0]):
+        reversed_flow = torch.zeros(target_flows[batch_idx].shape, device=device)
+        for row_idx in range(0, reversed_flow.shape[1]):
+            for col_idx in range(0, reversed_flow.shape[2]):
+                new_row_idx = row_idx + int(round(target_flows[batch_idx, 0, row_idx, col_idx].item()))
+                new_row_idx = 0 if new_row_idx < 0 else new_row_idx
+                new_row_idx = reversed_flow.shape[1] - 1 if new_row_idx > reversed_flow.shape[1] - 1 else new_row_idx
+                new_col_idx = col_idx + int(round(target_flows[batch_idx, 1, row_idx, col_idx].item()))
+                new_col_idx = 0 if new_col_idx < 0 else new_col_idx
+                new_col_idx = reversed_flow.shape[2] - 1 if new_col_idx > reversed_flow.shape[2] - 1 else new_col_idx
+                reversed_flow[0, new_row_idx, new_col_idx] = 0 if target_flows[batch_idx, 0, row_idx, col_idx] == 0 else -target_flows[batch_idx, 0, row_idx, col_idx]
+                reversed_flow[1, new_row_idx, new_col_idx] = 0 if target_flows[batch_idx, 1, row_idx, col_idx] == 0 else -target_flows[batch_idx, 1, row_idx, col_idx]
+        if batch_idx == 0:
+            batch_reversed_flow = reversed_flow
+            batch_reversed_flow = torch.unsqueeze(batch_reversed_flow, 0)
+        else:
+            reversed_flow = torch.unsqueeze(reversed_flow, 0)
+            batch_reversed_flow = torch.cat((batch_reversed_flow, reversed_flow), 0)
+    return batch_reversed_flow
+
+from itertools import chain
+import flow_vis
+import cv2
 import wandb
 wandb.init(project="pwcnet")
 def main():
-    # print(ProbabilisticNLLLoss((torch.rand(4,4, 20, 56), torch.rand(4, 4, 20, 56)), torch.rand(4, 2, 320, 896)))
-    train_loader = torch.utils.data.DataLoader(KITTI(), batch_size = 4, shuffle = True)
+    train_loader = torch.utils.data.DataLoader(KITTI(mode="training"), batch_size = 4, shuffle = True)
+    test_loader = torch.utils.data.DataLoader(KITTI(mode="testing"), batch_size = 4, shuffle = False)
     model = PWCDCNet()
-    # model.load_state_dict(torch.load("./models/not_divided_by_20.pth"))
     device = torch.device("cuda")
     model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
     wandb.watch(model)
     for epoch in range(1, 200):
-        running_loss = 0.0
-        print("Epoch {} losses:".format(epoch))
+        training_loss = 0.0
         for i, data in enumerate(train_loader, 0):
             optimizer.zero_grad()
             left_image, right_image, target_flows, valids = data[0].to(device), data[1].to(device), data[2].to(device), data[3].to(device)
@@ -224,17 +234,46 @@ def main():
             ## Target Flows: (batch_size, 2, 320, 896)
             ## Valids: (batch_size, 320, 896)
             flow2, flow3, flow4, flow5, flow6 = model(torch.cat((left_image, right_image), 1))
-            #upsampled_flows = upsample_flow_predictions([flow2[:, :2, :, :], flow3[:, :2, :, :], flow4[:, :2, :, :], flow5[:, :2, :, :], flow6[:, :2, :, :]])
-            #loss = total_EPE_loss(upsampled_flows, target_flows, valids)
             loss = ProbabilisticNLLLoss([flow2, flow3, flow4, flow5, flow6], target_flows, valids)
+            flow2, flow3, flow4, flow5, flow6 = model(torch.cat((right_image, left_image), 1))
+            loss = loss + ProbabilisticNLLLoss([flow2, flow3, flow4, flow5, flow6], reverse_optical_flow(target_flows, device), valids)
             loss.backward()
             optimizer.step()
-            running_loss += loss.item()
-            if i % 10 == 9:
-                print("[{} {}] loss: {:.5f}".format(epoch, i, running_loss / 10))
-                wandb.log({"Epoch Number": epoch, "Itertaion Number": i, "Loss": running_loss / 10})
-                running_loss = 0.0
-        print("Epoch {} ended".format(epoch))
-    torch.save(model.state_dict(), './models/prob_lr001_libloss_elu2_flow2_included.pth')
+            training_loss += loss.item()
+            print("Epoch {} Iter {} is over and the loss is {}".format(epoch, i, training_loss/2))
+        print("[Epoch {}] Training loss: {:.5f}".format(epoch, training_loss/2))
+        wandb.log({"Epoch Number": epoch, "Training Loss": training_loss/2})
+        running_loss = 0.0
+        with torch.no_grad():
+            model.eval()
+            validation_loss = 0.0
+            rgb_images = []
+            predicted_flow_images = []
+            target_flow_images = []
+            for i, data in enumerate(test_loader, 0):
+                left_image, right_image, target_flows, valids = data[0].to(device), data[1].to(device), data[2].to(device), data[3].to(device)
+                flow2 = model(torch.cat((left_image, right_image), 1))
+                upsample = torch.nn.Upsample(size=(320, 896), mode='bilinear', align_corners=False)
+                upsampled_flow2 = upsample(flow2)
+                upsampled_flow2 = upsampled_flow2 * (320 // flow2.shape[2])
+                validation_loss += total_EPE_loss([upsampled_flow2], target_flows, valids)
+                
+                if i == 0:
+                    for idx in range(4):
+                        img_show = left_image[idx].permute(1, 2, 0).cpu().numpy()
+                        img_show = img_show.clip(0, 1)
+                        rgb_images.append(wandb.Image(img_show, grouping=3))
+                        print(upsampled_flow2.shape)
+                        flowcolored_pred = flow_vis.flow_to_color(upsampled_flow2[idx, :2, :, :].permute(1, 2, 0).cpu().numpy())
+                        predicted_flow_images.append(wandb.Image(flowcolored_pred))
+
+                        flowcolored_gt = flow_vis.flow_to_color((target_flows[idx].permute(1, 2, 0)[:, :, :2]).cpu().numpy())
+                        target_flow_images.append(wandb.Image(flowcolored_gt))
+                    images_for_wandb = list(chain.from_iterable(zip(rgb_images, predicted_flow_images, target_flow_images)))
+                    wandb.log({'examples':images_for_wandb}, commit=False)
+            print("Validation loss: {:.5f}".format(validation_loss))
+            wandb.log({"Validation Loss":validation_loss})
+        model.train()
+    torch.save(model.state_dict(), './feb12/models/augmented.pth')
 if __name__ == "__main__":
     main()
