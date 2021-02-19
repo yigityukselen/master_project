@@ -99,6 +99,25 @@ class FlowDataset(data.Dataset):
     def __len__(self):
         return len(self.image_list)
 
+"""
+class KITTI(FlowDataset):
+    def __init__(self, aug_params=None, split='training', root='data_scene_flow'):
+        super(KITTI, self).__init__(aug_params, sparse=True)
+        if split == 'testing':
+            self.is_test = True
+
+        root = osp.join(root, split)
+        images1 = sorted(glob(osp.join(root, 'image_2/*_10.png')))
+        images2 = sorted(glob(osp.join(root, 'image_2/*_11.png')))
+
+        for img1, img2 in zip(images1, images2):
+            frame_id = img1.split('/')[-1]
+            self.extra_info += [ [frame_id] ]
+            self.image_list += [ [img1, img2] ]
+
+        if split == 'training':
+            self.flow_list = sorted(glob(osp.join(root, 'flow_occ/*_10.png')))
+"""
 
 class KITTI(torch.utils.data.Dataset):
     def __init__(self, mode=None):
@@ -160,6 +179,17 @@ def ProbabilisticNLLLoss(predicted_flows, target_flow, valids):
         loss_u = -dist_u.log_prob(target_flow[:, 0, :, :])
         loss_v = -dist_v.log_prob(target_flow[:, 1, :, :])
         loss = loss + torch.mul(loss_u, valids).mean() + torch.mul(loss_v, valids).mean()
+        """print("Distribution loss: {}".format(loss))
+        loss_u = torch.log(torch.mul(sigma_u, math.sqrt(math.pi * 2))) + torch.div(torch.mul((mean_u - target_flow[:, 0, :, :]), (mean_u - target_flow[:, 0, :, :])), torch.mul(torch.mul(sigma_u, sigma_u), 2) + epsilon)
+        loss_v = torch.log(torch.mul(sigma_v, math.sqrt(math.pi * 2))) + torch.div(torch.mul((mean_v - target_flow[:, 1, :, :]), (mean_v - target_flow[:, 1, :, :])), torch.mul(torch.mul(sigma_v, sigma_v), 2) + epsilon)
+        loss_test = loss_test + torch.mul(torch.add(loss_u, loss_v), valids).mean()
+        print("Implemented loss: {}".format(loss_test))"""
+        """loss_u = torch.log(sigma_u + epsilon) + torch.div(torch.mul((mean_u - target_flow[:, 0, :, :]), (mean_u - target_flow[:, 0, :, :])), torch.mul(torch.mul(sigma_u, sigma_u), 2) + epsilon)
+        loss_v = torch.log(sigma_v + epsilon) + torch.div(torch.mul((mean_v - target_flow[:, 1, :, :]), (mean_v - target_flow[:, 1, :, :])), torch.mul(torch.mul(sigma_v, sigma_v), 2) + epsilon)
+        loss = loss + torch.mul(torch.sum(loss_u + loss_v), valids).mean()"""
+        """loss_u = torch.log(torch.mul(sigma_u, math.sqrt(math.pi * 2))) + torch.div(torch.mul((mean_u - target_flow[:, 0, :, :]), (mean_u - target_flow[:, 0, :, :])), torch.mul(torch.mul(sigma_u, sigma_u), 2) + epsilon)
+        loss_v = torch.log(torch.mul(sigma_v, math.sqrt(math.pi * 2))) + torch.div(torch.mul((mean_v - target_flow[:, 1, :, :]), (mean_v - target_flow[:, 1, :, :])), torch.mul(torch.mul(sigma_v, sigma_v), 2) + epsilon)
+        loss = loss + torch.mul(torch.sum(loss_u + loss_v), valids).mean()"""
     return loss
 
 def upsample_flow_predictions(flow_list):
@@ -187,6 +217,14 @@ def total_EPE_loss(upsampled_flow_list, target_flows, valids):
     for upsampled_flow in upsampled_flow_list:
         total_loss = total_loss + EPE(upsampled_flow, target_flows, valids)
     return total_loss
+
+def apply_augmentations(tensor):
+    #transforms = torchvision.transforms.Compose([torchvision.transforms.functional.adjust_brightness(brightness_factor=2),
+    #                                                torchvision.transforms.functional.adjust_contrast(contrast_factor=2)])
+    
+    tensor = torchvision.transforms.functional.adjust_brightness(img=tensor, brightness_factor=2)
+    tensor = torchvision.transforms.functional.adjust_contrast(img=tensor, contrast_factor=2)
+    return tensor
 
 def reverse_optical_flow(target_flows, device):
     batch_reversed_flow = None
@@ -221,8 +259,9 @@ def main():
     model = PWCDCNet()
     device = torch.device("cuda")
     model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.0005)
     wandb.watch(model)
+    
     for epoch in range(1, 200):
         training_loss = 0.0
         for i, data in enumerate(train_loader, 0):
@@ -235,12 +274,11 @@ def main():
             ## Valids: (batch_size, 320, 896)
             flow2, flow3, flow4, flow5, flow6 = model(torch.cat((left_image, right_image), 1))
             loss = ProbabilisticNLLLoss([flow2, flow3, flow4, flow5, flow6], target_flows, valids)
-            flow2, flow3, flow4, flow5, flow6 = model(torch.cat((right_image, left_image), 1))
-            loss = loss + ProbabilisticNLLLoss([flow2, flow3, flow4, flow5, flow6], reverse_optical_flow(target_flows, device), valids)
+            flow2, flow3, flow4, flow5, flow6 = model(torch.cat((apply_augmentations(left_image), apply_augmentations(right_image)), 1))
+            loss = loss + ProbabilisticNLLLoss([flow2, flow3, flow4, flow5, flow6], target_flows, valids)
             loss.backward()
             optimizer.step()
             training_loss += loss.item()
-            print("Epoch {} Iter {} is over and the loss is {}".format(epoch, i, training_loss/2))
         print("[Epoch {}] Training loss: {:.5f}".format(epoch, training_loss/2))
         wandb.log({"Epoch Number": epoch, "Training Loss": training_loss/2})
         running_loss = 0.0
@@ -263,7 +301,6 @@ def main():
                         img_show = left_image[idx].permute(1, 2, 0).cpu().numpy()
                         img_show = img_show.clip(0, 1)
                         rgb_images.append(wandb.Image(img_show, grouping=3))
-                        print(upsampled_flow2.shape)
                         flowcolored_pred = flow_vis.flow_to_color(upsampled_flow2[idx, :2, :, :].permute(1, 2, 0).cpu().numpy())
                         predicted_flow_images.append(wandb.Image(flowcolored_pred))
 
@@ -274,6 +311,6 @@ def main():
             print("Validation loss: {:.5f}".format(validation_loss))
             wandb.log({"Validation Loss":validation_loss})
         model.train()
-    torch.save(model.state_dict(), './feb12/models/augmented.pth')
+    torch.save(model.state_dict(), './feb12/models/without_elu.pth')
 if __name__ == "__main__":
     main()
