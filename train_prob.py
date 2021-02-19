@@ -99,26 +99,6 @@ class FlowDataset(data.Dataset):
     def __len__(self):
         return len(self.image_list)
 
-"""
-class KITTI(FlowDataset):
-    def __init__(self, aug_params=None, split='training', root='data_scene_flow'):
-        super(KITTI, self).__init__(aug_params, sparse=True)
-        if split == 'testing':
-            self.is_test = True
-
-        root = osp.join(root, split)
-        images1 = sorted(glob(osp.join(root, 'image_2/*_10.png')))
-        images2 = sorted(glob(osp.join(root, 'image_2/*_11.png')))
-
-        for img1, img2 in zip(images1, images2):
-            frame_id = img1.split('/')[-1]
-            self.extra_info += [ [frame_id] ]
-            self.image_list += [ [img1, img2] ]
-
-        if split == 'training':
-            self.flow_list = sorted(glob(osp.join(root, 'flow_occ/*_10.png')))
-"""
-
 class KITTI(torch.utils.data.Dataset):
     def __init__(self, mode=None):
         self.left_images = None
@@ -179,17 +159,6 @@ def ProbabilisticNLLLoss(predicted_flows, target_flow, valids):
         loss_u = -dist_u.log_prob(target_flow[:, 0, :, :])
         loss_v = -dist_v.log_prob(target_flow[:, 1, :, :])
         loss = loss + torch.mul(loss_u, valids).mean() + torch.mul(loss_v, valids).mean()
-        """print("Distribution loss: {}".format(loss))
-        loss_u = torch.log(torch.mul(sigma_u, math.sqrt(math.pi * 2))) + torch.div(torch.mul((mean_u - target_flow[:, 0, :, :]), (mean_u - target_flow[:, 0, :, :])), torch.mul(torch.mul(sigma_u, sigma_u), 2) + epsilon)
-        loss_v = torch.log(torch.mul(sigma_v, math.sqrt(math.pi * 2))) + torch.div(torch.mul((mean_v - target_flow[:, 1, :, :]), (mean_v - target_flow[:, 1, :, :])), torch.mul(torch.mul(sigma_v, sigma_v), 2) + epsilon)
-        loss_test = loss_test + torch.mul(torch.add(loss_u, loss_v), valids).mean()
-        print("Implemented loss: {}".format(loss_test))"""
-        """loss_u = torch.log(sigma_u + epsilon) + torch.div(torch.mul((mean_u - target_flow[:, 0, :, :]), (mean_u - target_flow[:, 0, :, :])), torch.mul(torch.mul(sigma_u, sigma_u), 2) + epsilon)
-        loss_v = torch.log(sigma_v + epsilon) + torch.div(torch.mul((mean_v - target_flow[:, 1, :, :]), (mean_v - target_flow[:, 1, :, :])), torch.mul(torch.mul(sigma_v, sigma_v), 2) + epsilon)
-        loss = loss + torch.mul(torch.sum(loss_u + loss_v), valids).mean()"""
-        """loss_u = torch.log(torch.mul(sigma_u, math.sqrt(math.pi * 2))) + torch.div(torch.mul((mean_u - target_flow[:, 0, :, :]), (mean_u - target_flow[:, 0, :, :])), torch.mul(torch.mul(sigma_u, sigma_u), 2) + epsilon)
-        loss_v = torch.log(torch.mul(sigma_v, math.sqrt(math.pi * 2))) + torch.div(torch.mul((mean_v - target_flow[:, 1, :, :]), (mean_v - target_flow[:, 1, :, :])), torch.mul(torch.mul(sigma_v, sigma_v), 2) + epsilon)
-        loss = loss + torch.mul(torch.sum(loss_u + loss_v), valids).mean()"""
     return loss
 
 def upsample_flow_predictions(flow_list):
