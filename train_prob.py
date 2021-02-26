@@ -100,10 +100,11 @@ class FlowDataset(data.Dataset):
         return len(self.image_list)
 
 class KITTI(torch.utils.data.Dataset):
-    def __init__(self, mode=None):
+    def __init__(self, mode=None, transform=None):
         self.left_images = None
         self.right_images = None
         self.target_flows = None
+        self.transform = transform
         if mode == "training":
             self.left_images = sorted(glob(os.path.join("./data_scene_flow/training", 'image_2_training/*_10.png')))
             self.right_images = sorted(glob(os.path.join("./data_scene_flow/training", 'image_2_training/*_11.png')))
@@ -129,6 +130,11 @@ class KITTI(torch.utils.data.Dataset):
         
         right_image = torchvision.transforms.CenterCrop(size = (320, 896))(right_image)
         right_image = torchvision.transforms.ToTensor()(right_image)
+        
+        if self.transform:
+            left_image = self.transform(left_image)
+            right_image = self.transform(right_image)
+
         return left_image, right_image, torch.div(target_flows, 20), valids
 
     def __len__(self):
@@ -223,7 +229,8 @@ import cv2
 import wandb
 wandb.init(project="pwcnet")
 def main():
-    train_loader = torch.utils.data.DataLoader(KITTI(mode="training"), batch_size = 4, shuffle = True)
+    transform = torchvision.transforms.ColorJitter(brightness=(0.6, 1.0), contrast=(0.6, 1.0))
+    train_loader = torch.utils.data.DataLoader(KITTI(mode="training", transform = transform), batch_size = 4, shuffle = True)
     test_loader = torch.utils.data.DataLoader(KITTI(mode="testing"), batch_size = 4, shuffle = False)
     model = PWCDCNet()
     device = torch.device("cuda")
@@ -231,7 +238,7 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=0.0005)
     wandb.watch(model)
     
-    for epoch in range(1, 200):
+    for epoch in range(1, 300):
         training_loss = 0.0
         for i, data in enumerate(train_loader, 0):
             optimizer.zero_grad()
@@ -243,13 +250,11 @@ def main():
             ## Valids: (batch_size, 320, 896)
             flow2, flow3, flow4, flow5, flow6 = model(torch.cat((left_image, right_image), 1))
             loss = ProbabilisticNLLLoss([flow2, flow3, flow4, flow5, flow6], target_flows, valids)
-            flow2, flow3, flow4, flow5, flow6 = model(torch.cat((apply_augmentations(left_image), apply_augmentations(right_image)), 1))
-            loss = loss + ProbabilisticNLLLoss([flow2, flow3, flow4, flow5, flow6], target_flows, valids)
             loss.backward()
             optimizer.step()
             training_loss += loss.item()
-        print("[Epoch {}] Training loss: {:.5f}".format(epoch, training_loss/2))
-        wandb.log({"Epoch Number": epoch, "Training Loss": training_loss/2})
+        print("[Epoch {}] Training loss: {:.5f}".format(epoch, training_loss))
+        wandb.log({"Epoch Number": epoch, "Training Loss": training_loss})
         running_loss = 0.0
         with torch.no_grad():
             model.eval()
@@ -280,6 +285,6 @@ def main():
             print("Validation loss: {:.5f}".format(validation_loss))
             wandb.log({"Validation Loss":validation_loss})
         model.train()
-    torch.save(model.state_dict(), './feb12/models/without_elu.pth')
+    torch.save(model.state_dict(), './feb22/last_aug_300_06.pth')
 if __name__ == "__main__":
     main()
